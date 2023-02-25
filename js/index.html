@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<title>WebRTC client</title>
+</head>
+<body>
+	<video id="remote-video" autoplay></video>
+	<audio id="remote-audio" autoplay></audio>
+	<button id="start-call" disabled>Start Call</button>
+	<button id="stop-call">Stop Call</button>
+	<script>
+		const socket = new WebSocket('ws://192.168.178.176:8080/ws');
+        const config = {iceServers: [{urls:"stun:stun.l.google.com:19302"}], iceCandidatePoolSize: 1};
+		const peerConnection = new RTCPeerConnection(config);
+		let localStream, isCaller = false;
+
+		socket.addEventListener('open', () => {
+			console.log('Connected to signalling server');
+			socket.send('/join main');
+		});
+
+		socket.addEventListener('message', async (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.category === 'offer' && !isCaller) {
+                    peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    let message = {
+                        "category": "answer",
+                        "sdp": answer.sdp,
+                        "sdpMLineIndex": 0,
+                    }
+                    sendMessage(message);
+                } else if (data.category === 'answer') {
+                    peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
+                } else if (data.category === 'candidate' && peerConnection.remoteDescription != null) {
+                    try {
+                        let candidate = new RTCIceCandidate({
+                            candidate: data.sdp,
+                            sdpMLineIndex: data.sdpMLineIndex,
+                            sdpMid: data.sdpMid,
+                        })
+                        await peerConnection.addIceCandidate(candidate);
+                    } catch (error) {
+                        console.error('Error adding ICE candidate:', error);
+                    }
+                }
+            } catch (_) {
+
+            }
+			
+		});
+
+		socket.addEventListener('close', () => {
+			console.log('Disconnected from signalling server');
+		});
+
+		document.getElementById('start-call').addEventListener('click', () => {
+			isCaller = true;
+			socket.send(JSON.stringify({ category: 'join' }));
+		});
+
+		document.getElementById('stop-call').addEventListener('click', () => {
+			stopCall();
+		});
+
+		navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+			.then(stream => {
+				localStream = stream;
+				const localVideo = document.createElement('video');
+				localVideo.srcObject = localStream;
+				localVideo.autoplay = true;
+				localVideo.muted = true;
+				document.body.appendChild(localVideo);
+
+				localStream.getTracks().forEach(track => {
+					peerConnection.addTrack(track, localStream);
+				});
+
+				peerConnection.addEventListener('track', event => {
+                    console.log(event)
+					const remoteVideo = document.getElementById('remote-video');
+					const remoteAudio = document.getElementById('remote-audio');
+					if (event.track.kind === 'video') {
+						remoteVideo.srcObject = event.streams[0];
+					} else if (event.track.kind === 'audio') {
+						remoteAudio.srcObject = event.streams[0];
+					}
+				});
+
+                peerConnection.addEventListener('icecandidate', event => {
+                    console.log(event)
+                    if (event.candidate == null) {
+                        return
+                    }
+                    let candidate = {
+                        "category": "candidate",
+                        "sdp": event.candidate.candidate,
+                        "sdpMLineIndex": event.candidate.sdpMLineIndex,
+                        "sdpMid": event.candidate.sdpMid
+                    }
+                    sendMessage(candidate)
+                })
+			})
+			.catch(error => {
+				console.error('Error getting user media:', error);
+			});
+
+		async function sendMessage(message) {
+            let json = JSON.stringify(message)
+			socket.send(json);
+		}
+
+		async function stopCall() {
+			localStream.getTracks().forEach(track => {
+				track.stop();
+			});
+
+			peerConnection.close();
+			socket.close();
+
+			document.getElementById('start-call').disabled = false;
+			document.getElementById('stop-call').disabled = true;
+		}
+	</script>
+</body>
+</html>
